@@ -1,4 +1,3 @@
-
 package codegen;
 
 import ast.Program;
@@ -57,6 +56,10 @@ public class CodeGenerator {
         assembly.append("format_int:\n");
         assembly.append("    .asciz \"%lld\\n\"\n");
 
+        // Format string for scanf
+        assembly.append("input_format:\n");
+        assembly.append("    .asciz \"%lld\"\n");
+
         assembly.append("\n.text\n");
     }
 
@@ -90,13 +93,14 @@ public class CodeGenerator {
         );
 
         /*
-         * Reserve stack space for local variables.
+         * Reserve stack space for local variables
+         * and temporary values.
          *
-         * 128 bytes is enough for our current
-         * simple compiler implementation.
+         * 256 bytes gives us enough room for the
+         * current compiler implementation.
          */
         assembly.append(
-                "    subq $128, %rsp\n"
+                "    subq $256, %rsp\n"
         );
 
         // -----------------------------------------------------
@@ -172,7 +176,6 @@ public class CodeGenerator {
                                 + "\n"
                 );
             }
-
         }
 
         // -----------------------------------------------------
@@ -211,7 +214,6 @@ public class CodeGenerator {
                 generateExpression(
                         returnStatement.getValue()
                 );
-
             }
 
             else {
@@ -657,14 +659,9 @@ public class CodeGenerator {
 
         /*
          * RAX = right
-         *
          * R10 = right
          * RAX = left
-         *
-         * R10 is caller-saved on Windows x64,
-         * so it is safer than RBX here.
          */
-
         assembly.append(
                 "    movq %rax, %r10\n"
         );
@@ -920,19 +917,13 @@ public class CodeGenerator {
         // input()
         // -----------------------------------------------------
 
-        if (call.getName().equals("input")) {
-
-            /*
-             * Temporary implementation.
-             *
-             * Real console input will be implemented later.
-             */
-            assembly.append(
-                    "    movq $0, %rax\n"
-            );
-
-            return;
-        }
+    if (call.getName().equals("input")) {
+        assembly.append("    leaq -120(%rbp), %rdx\n");
+        assembly.append("    leaq input_format(%rip), %rcx\n");
+        assembly.append("    call scanf\n");
+        assembly.append("    movq -120(%rbp), %rax\n");
+        return;
+    }
 
         // -----------------------------------------------------
         // output()
@@ -958,13 +949,8 @@ public class CodeGenerator {
                  *
                  * RCX = first argument
                  * RDX = second argument
-                 * R8  = third argument
-                 * R9  = fourth argument
                  *
                  * printf(format, value)
-                 *
-                 * RCX = format
-                 * RDX = value
                  */
 
                 assembly.append(
@@ -976,32 +962,22 @@ public class CodeGenerator {
                 );
 
                 /*
-                 * Windows x64 requires 32 bytes
-                 * of shadow/home space for function calls.
-                 *
-                 * Our stack is already aligned because
-                 * the function prologue reserves 128 bytes.
+                 * 32 bytes shadow space + 8 bytes
+                 * for stack alignment.
                  */
 
-                assembly.append(
-                        "    subq $32, %rsp\n"
-                );
+                
 
                 assembly.append(
                         "    call printf\n"
                 );
 
-                assembly.append(
-                        "    addq $32, %rsp\n"
-                );
+                
             }
 
             /*
              * output() behaves as void.
-             *
-             * We keep RAX = 0.
              */
-
             assembly.append(
                     "    movq $0, %rax\n"
             );
@@ -1045,4 +1021,3 @@ public class CodeGenerator {
                 + labelCounter++;
     }
 }
-
