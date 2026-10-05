@@ -5,35 +5,48 @@ import ast.Expression;
 import ast.Statement;
 import ast.expressions.*;
 import ast.statements.*;
-
 import lexer.TokenType;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Stack;
 
 public class CodeGenerator {
 
-    private final StringBuilder assembly =
-            new StringBuilder();
+    private final StringBuilder assembly = new StringBuilder();
 
-    private final Map<String, Integer> variables =
-            new HashMap<>();
+    private final Map<String, Integer> variables = new HashMap<>();
+    private final Map<String, Boolean> decimalVariables = new HashMap<>();
+    private final Map<String, String> functionReturnTypes = new HashMap<>();
+
+    private final Stack<String> loopEndLabels = new Stack<>();
+    private final Stack<String> loopContinueLabels = new Stack<>();
 
     private int stackOffset = 0;
     private int labelCounter = 0;
+    private String currentFunctionReturnType = "void";
 
     public String generate(Program program) {
-
         assembly.setLength(0);
         variables.clear();
+        decimalVariables.clear();
+        functionReturnTypes.clear();
+        loopEndLabels.clear();
+        loopContinueLabels.clear();
         stackOffset = 0;
         labelCounter = 0;
 
+        for (FunctionDeclaration function : program.getFunctions()) {
+            functionReturnTypes.put(
+                    function.getName(),
+                    function.getReturnType()
+            );
+        }
+
         generateHeader();
 
-        for (FunctionDeclaration function :
-                program.getFunctions()) {
-
+        for (FunctionDeclaration function : program.getFunctions()) {
             generateFunction(function);
         }
 
@@ -45,18 +58,17 @@ public class CodeGenerator {
     // =========================================================
 
     private void generateHeader() {
-
         assembly.append(".text\n");
         assembly.append(".globl main\n");
 
-        // Windows / MinGW read-only data section
         assembly.append("\n.section .rdata\n");
 
-        // Format string for printf
         assembly.append("format_int:\n");
         assembly.append("    .asciz \"%lld\\n\"\n");
 
-        // Format string for scanf
+        assembly.append("format_decimal:\n");
+        assembly.append("    .asciz \"%.6f\\n\"\n");
+
         assembly.append("input_format:\n");
         assembly.append("    .asciz \"%lld\"\n");
 
@@ -67,219 +79,180 @@ public class CodeGenerator {
     // FUNCTION GENERATION
     // =========================================================
 
-    private void generateFunction(
-            FunctionDeclaration function
-    ) {
-
+    private void generateFunction(FunctionDeclaration function) {
         variables.clear();
+        decimalVariables.clear();
+        loopEndLabels.clear();
+        loopContinueLabels.clear();
         stackOffset = 0;
+        currentFunctionReturnType = function.getReturnType();
 
         String name = function.getName();
 
-        assembly.append("\n");
-        assembly.append(".globl " + name + "\n");
+        assembly.append("\n.globl " + name + "\n");
         assembly.append(name + ":\n");
 
-        // -----------------------------------------------------
-        // Function prologue
-        // -----------------------------------------------------
+        assembly.append("    pushq %rbp\n");
+        assembly.append("    movq %rsp, %rbp\n");
+        assembly.append("    subq $512, %rsp\n");
 
-        assembly.append(
-                "    pushq %rbp\n"
-        );
+        String[] integerParameterRegisters = {
+                "%rcx", "%rdx", "%r8", "%r9"
+        };
+        String[] decimalParameterRegisters = {
+                "%xmm0", "%xmm1", "%xmm2", "%xmm3"
+        };
 
-        assembly.append(
-                "    movq %rsp, %rbp\n"
-        );
+        for (int i = 0; i < function.getParameters().size(); i++) {
+            Parameter parameter = function.getParameters().get(i);
 
-        /*
-         * Reserve stack space for local variables
-         * and temporary values.
-         *
-         * 256 bytes gives us enough room for the
-         * current compiler implementation.
-         */
-        assembly.append(
-                "    subq $256, %rsp\n"
-        );
+            stackOffset -= 8;
+            variables.put(parameter.getName(), stackOffset);
 
-        // -----------------------------------------------------
-        // Function body
-        // -----------------------------------------------------
+            boolean decimal = parameter.getType().equals("decimal");
+            decimalVariables.put(parameter.getName(), decimal);
 
-        for (Statement statement :
-                function.getBody()) {
+            if (i < 4) {
+                if (decimal) {
+                    assembly.append(
+                            "    movsd " + decimalParameterRegisters[i]
+                                    + ", " + memoryLocation(stackOffset) + "\n"
+                    );
+                } else {
+                    assembly.append(
+                            "    movq " + integerParameterRegisters[i]
+                                    + ", " + memoryLocation(stackOffset) + "\n"
+                    );
+                }
+            }
+        }
 
+        for (Statement statement : function.getBody()) {
             generateStatement(statement);
         }
 
-        // -----------------------------------------------------
-        // Default return
-        // -----------------------------------------------------
-
-        assembly.append(
-                "    movq $0, %rax\n"
-        );
+        if (function.getReturnType().equals("decimal")) {
+            assembly.append("    pxor %xmm0, %xmm0\n");
+        } else {
+            assembly.append("    movq $0, %rax\n");
+        }
 
         generateFunctionEpilogue();
     }
 
-    // =========================================================
-    // FUNCTION EPILOGUE
-    // =========================================================
-
     private void generateFunctionEpilogue() {
-
-        assembly.append(
-                "    movq %rbp, %rsp\n"
-        );
-
-        assembly.append(
-                "    popq %rbp\n"
-        );
-
-        assembly.append(
-                "    ret\n"
-        );
+        assembly.append("    movq %rbp, %rsp\n");
+        assembly.append("    popq %rbp\n");
+        assembly.append("    ret\n");
     }
 
     // =========================================================
     // STATEMENTS
     // =========================================================
 
-    private void generateStatement(
-            Statement statement
-    ) {
-
-        // -----------------------------------------------------
-        // Variable declaration
-        // -----------------------------------------------------
+    private void generateStatement(Statement statement) {
 
         if (statement instanceof VariableDeclaration declaration) {
-
             stackOffset -= 8;
 
-            variables.put(
+            variables.put(declaration.getName(), stackOffset);
+            decimalVariables.put(
                     declaration.getName(),
-                    stackOffset
+                    declaration.getType().equals("decimal")
             );
 
             if (declaration.getInitializer() != null) {
+                generateExpression(declaration.getInitializer());
 
-                generateExpression(
-                        declaration.getInitializer()
-                );
-
-                assembly.append(
-                        "    movq %rax, "
-                                + memoryLocation(stackOffset)
-                                + "\n"
-                );
-            }
-        }
-
-        // -----------------------------------------------------
-        // Assignment
-        // -----------------------------------------------------
-
-        else if (statement instanceof Assignment assignment) {
-
-            generateExpression(
-                    assignment.getValue()
-            );
-
-            Integer offset =
-                    variables.get(
-                            assignment.getName()
+                if (declaration.getType().equals("decimal")) {
+                    ensureDecimalResult(declaration.getInitializer());
+                    assembly.append(
+                            "    movsd %xmm0, "
+                                    + memoryLocation(stackOffset) + "\n"
                     );
-
-            if (offset != null) {
-
-                assembly.append(
-                        "    movq %rax, "
-                                + memoryLocation(offset)
-                                + "\n"
-                );
+                } else {
+                    assembly.append(
+                            "    movq %rax, "
+                                    + memoryLocation(stackOffset) + "\n"
+                    );
+                }
             }
+            return;
         }
 
-        // -----------------------------------------------------
-        // Return / send
-        // -----------------------------------------------------
+        if (statement instanceof Assignment assignment) {
+            generateExpression(assignment.getValue());
 
-        else if (statement instanceof ReturnStatement returnStatement) {
-
-            if (returnStatement.getValue() != null) {
-
-                generateExpression(
-                        returnStatement.getValue()
-                );
+            Integer offset = variables.get(assignment.getName());
+            if (offset != null) {
+                if (decimalVariables.getOrDefault(assignment.getName(), false)) {
+                    ensureDecimalResult(assignment.getValue());
+                    assembly.append(
+                            "    movsd %xmm0, "
+                                    + memoryLocation(offset) + "\n"
+                    );
+                } else {
+                    assembly.append(
+                            "    movq %rax, "
+                                    + memoryLocation(offset) + "\n"
+                    );
+                }
             }
+            return;
+        }
 
-            else {
+        if (statement instanceof ReturnStatement returnStatement) {
+            if (returnStatement.getValue() != null) {
+                generateExpression(returnStatement.getValue());
 
-                assembly.append(
-                        "    movq $0, %rax\n"
-                );
+                if (currentFunctionReturnType.equals("decimal")) {
+                    ensureDecimalResult(returnStatement.getValue());
+                }
+            } else if (currentFunctionReturnType.equals("decimal")) {
+                assembly.append("    pxor %xmm0, %xmm0\n");
+            } else {
+                assembly.append("    movq $0, %rax\n");
             }
 
             generateFunctionEpilogue();
+            return;
         }
 
-        // -----------------------------------------------------
-        // Expression statement
-        // -----------------------------------------------------
-
-        else if (statement instanceof ExpressionStatement expressionStatement) {
-
-            generateExpression(
-                    expressionStatement.getExpression()
-            );
+        if (statement instanceof ExpressionStatement expressionStatement) {
+            generateExpression(expressionStatement.getExpression());
+            return;
         }
 
-        // -----------------------------------------------------
-        // If statement
-        // -----------------------------------------------------
-
-        else if (statement instanceof IfStatement ifStatement) {
-
+        if (statement instanceof IfStatement ifStatement) {
             generateIf(ifStatement);
+            return;
         }
 
-        // -----------------------------------------------------
-        // While / loop
-        // -----------------------------------------------------
-
-        else if (statement instanceof WhileStatement whileStatement) {
-
+        if (statement instanceof WhileStatement whileStatement) {
             generateWhile(whileStatement);
+            return;
         }
 
-        // -----------------------------------------------------
-        // Each
-        // -----------------------------------------------------
-
-        else if (statement instanceof EachStatement eachStatement) {
-
+        if (statement instanceof EachStatement eachStatement) {
             generateEach(eachStatement);
+            return;
         }
 
-        // -----------------------------------------------------
-        // Break
-        // -----------------------------------------------------
-
-        else if (statement instanceof BreakStatement) {
-
-            // Will be implemented with loop labels.
+        if (statement instanceof BreakStatement) {
+            if (!loopEndLabels.isEmpty()) {
+                assembly.append(
+                        "    jmp " + loopEndLabels.peek() + "\n"
+                );
+            }
+            return;
         }
 
-        // -----------------------------------------------------
-        // Skip
-        // -----------------------------------------------------
-
-        else if (statement instanceof SkipStatement) {
-
-            // Will be implemented with loop labels.
+        if (statement instanceof SkipStatement) {
+            if (!loopContinueLabels.isEmpty()) {
+                assembly.append(
+                        "    jmp " + loopContinueLabels.peek() + "\n"
+                );
+            }
         }
     }
 
@@ -287,349 +260,183 @@ public class CodeGenerator {
     // IF
     // =========================================================
 
-    private void generateIf(
-            IfStatement statement
-    ) {
+    private void generateIf(IfStatement statement) {
+        String elseLabel = newLabel("else");
+        String endLabel = newLabel("endif");
 
-        String elseLabel =
-                newLabel("else");
+        generateExpression(statement.getCondition());
+        assembly.append("    cmpq $0, %rax\n");
+        assembly.append("    je " + elseLabel + "\n");
 
-        String endLabel =
-                newLabel("endif");
-
-        // Generate condition
-        generateExpression(
-                statement.getCondition()
-        );
-
-        assembly.append(
-                "    cmpq $0, %rax\n"
-        );
-
-        assembly.append(
-                "    je "
-                        + elseLabel
-                        + "\n"
-        );
-
-        // Then branch
-        for (Statement bodyStatement :
-                statement.getThenBranch()) {
-
+        for (Statement bodyStatement : statement.getThenBranch()) {
             generateStatement(bodyStatement);
         }
 
-        assembly.append(
-                "    jmp "
-                        + endLabel
-                        + "\n"
-        );
+        assembly.append("    jmp " + endLabel + "\n");
+        assembly.append(elseLabel + ":\n");
 
-        // Else label
-        assembly.append(
-                elseLabel
-                        + ":\n"
-        );
-
-        // Else branch
         if (statement.getElseBranch() != null) {
-
-            for (Statement bodyStatement :
-                    statement.getElseBranch()) {
-
+            for (Statement bodyStatement : statement.getElseBranch()) {
                 generateStatement(bodyStatement);
             }
         }
 
-        // End
-        assembly.append(
-                endLabel
-                        + ":\n"
-        );
+        assembly.append(endLabel + ":\n");
     }
 
     // =========================================================
     // WHILE / LOOP
     // =========================================================
 
-    private void generateWhile(
-            WhileStatement statement
-    ) {
+    private void generateWhile(WhileStatement statement) {
+        String startLabel = newLabel("loop");
+        String endLabel = newLabel("endloop");
 
-        String startLabel =
-                newLabel("loop");
+        loopEndLabels.push(endLabel);
+        loopContinueLabels.push(startLabel);
 
-        String endLabel =
-                newLabel("endloop");
+        assembly.append(startLabel + ":\n");
 
-        // Start
-        assembly.append(
-                startLabel
-                        + ":\n"
-        );
+        generateExpression(statement.getCondition());
+        assembly.append("    cmpq $0, %rax\n");
+        assembly.append("    je " + endLabel + "\n");
 
-        // Condition
-        generateExpression(
-                statement.getCondition()
-        );
-
-        assembly.append(
-                "    cmpq $0, %rax\n"
-        );
-
-        assembly.append(
-                "    je "
-                        + endLabel
-                        + "\n"
-        );
-
-        // Body
-        for (Statement bodyStatement :
-                statement.getBody()) {
-
+        for (Statement bodyStatement : statement.getBody()) {
             generateStatement(bodyStatement);
         }
 
-        // Jump back
-        assembly.append(
-                "    jmp "
-                        + startLabel
-                        + "\n"
-        );
+        assembly.append("    jmp " + startLabel + "\n");
+        assembly.append(endLabel + ":\n");
 
-        // End
-        assembly.append(
-                endLabel
-                        + ":\n"
-        );
+        loopContinueLabels.pop();
+        loopEndLabels.pop();
     }
 
     // =========================================================
     // EACH
     // =========================================================
 
-    private void generateEach(
-            EachStatement statement
-    ) {
-
-        // Initializer
+    private void generateEach(EachStatement statement) {
         if (statement.getInitializer() != null) {
-
-            generateStatement(
-                    statement.getInitializer()
-            );
+            generateStatement(statement.getInitializer());
         }
 
-        String startLabel =
-                newLabel("each");
+        String startLabel = newLabel("each");
+        String endLabel = newLabel("endeach");
 
-        String endLabel =
-                newLabel("endeach");
+        loopEndLabels.push(endLabel);
+        loopContinueLabels.push(startLabel);
 
-        // Start
-        assembly.append(
-                startLabel
-                        + ":\n"
-        );
+        assembly.append(startLabel + ":\n");
 
-        // Condition
         if (statement.getCondition() != null) {
-
-            generateExpression(
-                    statement.getCondition()
-            );
-
-            assembly.append(
-                    "    cmpq $0, %rax\n"
-            );
-
-            assembly.append(
-                    "    je "
-                            + endLabel
-                            + "\n"
-            );
+            generateExpression(statement.getCondition());
+            assembly.append("    cmpq $0, %rax\n");
+            assembly.append("    je " + endLabel + "\n");
         }
 
-        // Body
-        for (Statement bodyStatement :
-                statement.getBody()) {
-
+        for (Statement bodyStatement : statement.getBody()) {
             generateStatement(bodyStatement);
         }
 
-        // Update
         if (statement.getUpdate() != null) {
-
-            generateStatement(
-                    statement.getUpdate()
-            );
+            generateStatement(statement.getUpdate());
         }
 
-        // Repeat
-        assembly.append(
-                "    jmp "
-                        + startLabel
-                        + "\n"
-        );
+        assembly.append("    jmp " + startLabel + "\n");
+        assembly.append(endLabel + ":\n");
 
-        // End
-        assembly.append(
-                endLabel
-                        + ":\n"
-        );
+        loopContinueLabels.pop();
+        loopEndLabels.pop();
     }
 
     // =========================================================
     // EXPRESSIONS
     // =========================================================
 
-    private void generateExpression(
-            Expression expression
-    ) {
-
-        // -----------------------------------------------------
-        // Literal
-        // -----------------------------------------------------
+    private void generateExpression(Expression expression) {
 
         if (expression instanceof LiteralExpression literal) {
-
-            Object value =
-                    literal.getValue();
+            Object value = literal.getValue();
 
             if (value instanceof Integer) {
+                assembly.append("    movq $" + value + ", %rax\n");
+                return;
+            }
 
+            if (value instanceof Double) {
+                long bits = Double.doubleToRawLongBits((Double) value);
+                assembly.append("    movabsq $" + bits + ", %rax\n");
+                assembly.append("    movq %rax, %xmm0\n");
+                return;
+            }
+
+            if (value instanceof Boolean) {
                 assembly.append(
-                        "    movq $"
-                                + value
+                        "    movq $" + ((Boolean) value ? "1" : "0")
                                 + ", %rax\n"
                 );
+                return;
             }
 
-            else if (value instanceof Boolean) {
-
-                boolean booleanValue =
-                        (Boolean) value;
-
+            if (value instanceof Character) {
                 assembly.append(
-                        "    movq $"
-                                + (booleanValue ? "1" : "0")
-                                + ", %rax\n"
+                        "    movq $" + (int) ((Character) value) + ", %rax\n"
                 );
+                return;
             }
 
-            else if (value instanceof Character) {
-
-                char character =
-                        (Character) value;
-
-                assembly.append(
-                        "    movq $"
-                                + (int) character
-                                + ", %rax\n"
-                );
-            }
-
-            else if (value instanceof String) {
-
-                /*
-                 * String literals are not yet fully supported
-                 * by the backend.
-                 */
-                assembly.append(
-                        "    movq $0, %rax\n"
-                );
-            }
-
-            else if (value instanceof Double) {
-
-                /*
-                 * Decimal floating-point code generation
-                 * will be implemented later.
-                 */
-                assembly.append(
-                        "    movq $0, %rax\n"
-                );
+            if (value instanceof String) {
+                assembly.append("    movq $0, %rax\n");
+                return;
             }
         }
 
-        // -----------------------------------------------------
-        // Variable
-        // -----------------------------------------------------
+        if (expression instanceof VariableExpression variable) {
+            Integer offset = variables.get(variable.getName());
 
-        else if (expression instanceof VariableExpression variable) {
-
-            Integer offset =
-                    variables.get(
-                            variable.getName()
-                    );
-
-            if (offset != null) {
-
-                assembly.append(
-                        "    movq "
-                                + memoryLocation(offset)
-                                + ", %rax\n"
-                );
+            if (offset == null) {
+                assembly.append("    movq $0, %rax\n");
+                return;
             }
 
-            else {
-
+            if (decimalVariables.getOrDefault(variable.getName(), false)) {
                 assembly.append(
-                        "    movq $0, %rax\n"
+                        "    movsd " + memoryLocation(offset) + ", %xmm0\n"
+                );
+            } else {
+                assembly.append(
+                        "    movq " + memoryLocation(offset) + ", %rax\n"
                 );
             }
+            return;
         }
 
-        // -----------------------------------------------------
-        // Binary expression
-        // -----------------------------------------------------
-
-        else if (expression instanceof BinaryExpression binary) {
-
+        if (expression instanceof BinaryExpression binary) {
             generateBinaryExpression(binary);
+            return;
         }
 
-        // -----------------------------------------------------
-        // Unary expression
-        // -----------------------------------------------------
+        if (expression instanceof UnaryExpression unary) {
+            generateExpression(unary.getExpression());
 
-        else if (expression instanceof UnaryExpression unary) {
-
-            generateExpression(
-                    unary.getExpression()
-            );
-
-            if (unary.getOperator()
-                    == TokenType.MINUS) {
-
-                assembly.append(
-                        "    negq %rax\n"
-                );
+            if (unary.getOperator() == TokenType.MINUS) {
+                if (isDecimalExpression(unary.getExpression())) {
+                    assembly.append("    pxor %xmm1, %xmm1\n");
+                    assembly.append("    subsd %xmm0, %xmm1\n");
+                    assembly.append("    movsd %xmm1, %xmm0\n");
+                } else {
+                    assembly.append("    negq %rax\n");
+                }
+            } else if (unary.getOperator() == TokenType.NOT) {
+                assembly.append("    cmpq $0, %rax\n");
+                assembly.append("    sete %al\n");
+                assembly.append("    movzbq %al, %rax\n");
             }
-
-            else if (unary.getOperator()
-                    == TokenType.NOT) {
-
-                assembly.append(
-                        "    cmpq $0, %rax\n"
-                );
-
-                assembly.append(
-                        "    sete %al\n"
-                );
-
-                assembly.append(
-                        "    movzbq %al, %rax\n"
-                );
-            }
+            return;
         }
 
-        // -----------------------------------------------------
-        // Function call
-        // -----------------------------------------------------
-
-        else if (expression instanceof CallExpression call) {
-
+        if (expression instanceof CallExpression call) {
             generateCall(call);
         }
     }
@@ -638,386 +445,320 @@ public class CodeGenerator {
     // BINARY EXPRESSIONS
     // =========================================================
 
-    private void generateBinaryExpression(
-            BinaryExpression expression
-    ) {
+    private void generateBinaryExpression(BinaryExpression expression) {
+        TokenType operator = expression.getOperator();
 
-        // Generate left
-        generateExpression(
-                expression.getLeft()
-        );
+        boolean numericArithmetic =
+                operator == TokenType.PLUS
+                        || operator == TokenType.MINUS
+                        || operator == TokenType.STAR
+                        || operator == TokenType.SLASH
+                        || operator == TokenType.PERCENT;
 
-        // Save left value
-        assembly.append(
-                "    pushq %rax\n"
-        );
+        boolean comparison =
+                operator == TokenType.EQUAL_EQUAL
+                        || operator == TokenType.NOT_EQUAL
+                        || operator == TokenType.LESS
+                        || operator == TokenType.LESS_EQUAL
+                        || operator == TokenType.GREATER
+                        || operator == TokenType.GREATER_EQUAL;
 
-        // Generate right
-        generateExpression(
-                expression.getRight()
-        );
+        if ((numericArithmetic || comparison)
+                && (isDecimalExpression(expression.getLeft())
+                || isDecimalExpression(expression.getRight()))) {
+            generateDecimalBinaryExpression(expression);
+            return;
+        }
 
-        /*
-         * RAX = right
-         * R10 = right
-         * RAX = left
-         */
-        assembly.append(
-                "    movq %rax, %r10\n"
-        );
+        generateExpression(expression.getLeft());
+        assembly.append("    pushq %rax\n");
 
-        assembly.append(
-                "    popq %rax\n"
-        );
+        generateExpression(expression.getRight());
+        assembly.append("    movq %rax, %r10\n");
+        assembly.append("    popq %rax\n");
 
-        switch (expression.getOperator()) {
-
-            // -------------------------------------------------
-            // Addition
-            // -------------------------------------------------
-
+        switch (operator) {
             case PLUS:
-
-                assembly.append(
-                        "    addq %r10, %rax\n"
-                );
-
+                assembly.append("    addq %r10, %rax\n");
                 break;
-
-            // -------------------------------------------------
-            // Subtraction
-            // -------------------------------------------------
-
             case MINUS:
-
-                assembly.append(
-                        "    subq %r10, %rax\n"
-                );
-
+                assembly.append("    subq %r10, %rax\n");
                 break;
-
-            // -------------------------------------------------
-            // Multiplication
-            // -------------------------------------------------
-
             case STAR:
-
-                assembly.append(
-                        "    imulq %r10, %rax\n"
-                );
-
+                assembly.append("    imulq %r10, %rax\n");
                 break;
-
-            // -------------------------------------------------
-            // Division
-            // -------------------------------------------------
-
             case SLASH:
-
-                assembly.append(
-                        "    cqto\n"
-                );
-
-                assembly.append(
-                        "    idivq %r10\n"
-                );
-
+                assembly.append("    cqto\n");
+                assembly.append("    idivq %r10\n");
                 break;
-
-            // -------------------------------------------------
-            // Modulo
-            // -------------------------------------------------
-
             case PERCENT:
-
-                assembly.append(
-                        "    cqto\n"
-                );
-
-                assembly.append(
-                        "    idivq %r10\n"
-                );
-
-                assembly.append(
-                        "    movq %rdx, %rax\n"
-                );
-
+                assembly.append("    cqto\n");
+                assembly.append("    idivq %r10\n");
+                assembly.append("    movq %rdx, %rax\n");
                 break;
-
-            // -------------------------------------------------
-            // Equality
-            // -------------------------------------------------
-
             case EQUAL_EQUAL:
-
                 generateComparison("sete");
-
                 break;
-
-            // -------------------------------------------------
-            // Not equal
-            // -------------------------------------------------
-
             case NOT_EQUAL:
-
                 generateComparison("setne");
-
                 break;
-
-            // -------------------------------------------------
-            // Less
-            // -------------------------------------------------
-
             case LESS:
-
                 generateComparison("setl");
-
                 break;
-
-            // -------------------------------------------------
-            // Less or equal
-            // -------------------------------------------------
-
             case LESS_EQUAL:
-
                 generateComparison("setle");
-
                 break;
-
-            // -------------------------------------------------
-            // Greater
-            // -------------------------------------------------
-
             case GREATER:
-
                 generateComparison("setg");
-
                 break;
-
-            // -------------------------------------------------
-            // Greater or equal
-            // -------------------------------------------------
-
             case GREATER_EQUAL:
-
                 generateComparison("setge");
-
                 break;
-
-            // -------------------------------------------------
-            // Logical AND
-            // -------------------------------------------------
-
             case AND_AND:
-
-                assembly.append(
-                        "    cmpq $0, %rax\n"
-                );
-
-                assembly.append(
-                        "    setne %al\n"
-                );
-
-                assembly.append(
-                        "    movzbq %al, %rax\n"
-                );
-
-                assembly.append(
-                        "    cmpq $0, %r10\n"
-                );
-
-                assembly.append(
-                        "    setne %r10b\n"
-                );
-
-                assembly.append(
-                        "    movzbq %r10b, %r10\n"
-                );
-
-                assembly.append(
-                        "    andq %r10, %rax\n"
-                );
-
+                normalizeBoolean("%rax");
+                normalizeBoolean("%r10");
+                assembly.append("    andq %r10, %rax\n");
                 break;
-
-            // -------------------------------------------------
-            // Logical OR
-            // -------------------------------------------------
-
             case OR_OR:
-
-                assembly.append(
-                        "    cmpq $0, %rax\n"
-                );
-
-                assembly.append(
-                        "    setne %al\n"
-                );
-
-                assembly.append(
-                        "    movzbq %al, %rax\n"
-                );
-
-                assembly.append(
-                        "    cmpq $0, %r10\n"
-                );
-
-                assembly.append(
-                        "    setne %r10b\n"
-                );
-
-                assembly.append(
-                        "    movzbq %r10b, %r10\n"
-                );
-
-                assembly.append(
-                        "    orq %r10, %rax\n"
-                );
-
+                normalizeBoolean("%rax");
+                normalizeBoolean("%r10");
+                assembly.append("    orq %r10, %rax\n");
                 break;
-
             default:
-
                 break;
         }
     }
 
+    private void generateDecimalBinaryExpression(BinaryExpression expression) {
+        TokenType operator = expression.getOperator();
+
+        generateDecimalExpression(expression.getLeft());
+        assembly.append("    subq $16, %rsp\n");
+        assembly.append("    movsd %xmm0, 8(%rsp)\n");
+
+        generateDecimalExpression(expression.getRight());
+        assembly.append("    movsd %xmm0, %xmm1\n");
+        assembly.append("    movsd 8(%rsp), %xmm0\n");
+        assembly.append("    addq $16, %rsp\n");
+
+        switch (operator) {
+            case PLUS:
+                assembly.append("    addsd %xmm1, %xmm0\n");
+                break;
+            case MINUS:
+                assembly.append("    subsd %xmm1, %xmm0\n");
+                break;
+            case STAR:
+                assembly.append("    mulsd %xmm1, %xmm0\n");
+                break;
+            case SLASH:
+                assembly.append("    divsd %xmm1, %xmm0\n");
+                break;
+            case PERCENT:
+                assembly.append("    call fmod\n");
+                break;
+            case EQUAL_EQUAL:
+                generateDecimalComparison("sete");
+                break;
+            case NOT_EQUAL:
+                generateDecimalComparison("setne");
+                break;
+            case LESS:
+                generateDecimalComparison("setb");
+                break;
+            case LESS_EQUAL:
+                generateDecimalComparison("setbe");
+                break;
+            case GREATER:
+                generateDecimalComparison("seta");
+                break;
+            case GREATER_EQUAL:
+                generateDecimalComparison("setae");
+                break;
+            default:
+                assembly.append("    pxor %xmm0, %xmm0\n");
+                break;
+        }
+    }
+
+    private void generateDecimalExpression(Expression expression) {
+        generateExpression(expression);
+        ensureDecimalResult(expression);
+    }
+
+    private void ensureDecimalResult(Expression expression) {
+        if (!isDecimalExpression(expression)) {
+            assembly.append("    cvtsi2sd %rax, %xmm0\n");
+        }
+    }
+
+    private void generateComparison(String instruction) {
+        assembly.append("    cmpq %r10, %rax\n");
+        assembly.append("    " + instruction + " %al\n");
+        assembly.append("    movzbq %al, %rax\n");
+    }
+
+    private void generateDecimalComparison(String instruction) {
+        assembly.append("    ucomisd %xmm1, %xmm0\n");
+        assembly.append("    " + instruction + " %al\n");
+        assembly.append("    movzbq %al, %rax\n");
+    }
+
+    private void normalizeBoolean(String register) {
+        assembly.append("    cmpq $0, " + register + "\n");
+        if (register.equals("%rax")) {
+            assembly.append("    setne %al\n");
+            assembly.append("    movzbq %al, %rax\n");
+        } else {
+            assembly.append("    setne %r10b\n");
+            assembly.append("    movzbq %r10b, %r10\n");
+        }
+    }
+
     // =========================================================
-    // COMPARISON
+    // TYPE / EXPRESSION HELPERS
     // =========================================================
 
-    private void generateComparison(
-            String instruction
-    ) {
+    private boolean isDecimalExpression(Expression expression) {
+        if (expression instanceof LiteralExpression literal) {
+            return literal.getValue() instanceof Double;
+        }
 
-        assembly.append(
-                "    cmpq %r10, %rax\n"
-        );
+        if (expression instanceof VariableExpression variable) {
+            return decimalVariables.getOrDefault(variable.getName(), false);
+        }
 
-        assembly.append(
-                "    "
-                        + instruction
-                        + " %al\n"
-        );
+        if (expression instanceof UnaryExpression unary) {
+            return unary.getOperator() == TokenType.MINUS
+                    && isDecimalExpression(unary.getExpression());
+        }
 
-        assembly.append(
-                "    movzbq %al, %rax\n"
-        );
+        if (expression instanceof BinaryExpression binary) {
+            TokenType op = binary.getOperator();
+
+            if (op == TokenType.PLUS
+                    || op == TokenType.MINUS
+                    || op == TokenType.STAR
+                    || op == TokenType.SLASH
+                    || op == TokenType.PERCENT) {
+                return isDecimalExpression(binary.getLeft())
+                        || isDecimalExpression(binary.getRight());
+            }
+
+            if (op == TokenType.EQUAL_EQUAL
+                    || op == TokenType.NOT_EQUAL
+                    || op == TokenType.LESS
+                    || op == TokenType.LESS_EQUAL
+                    || op == TokenType.GREATER
+                    || op == TokenType.GREATER_EQUAL
+                    || op == TokenType.AND_AND
+                    || op == TokenType.OR_OR) {
+                return false;
+            }
+        }
+
+        if (expression instanceof CallExpression call) {
+            return "decimal".equals(
+                    functionReturnTypes.get(call.getName())
+            );
+        }
+
+        return false;
     }
 
     // =========================================================
     // FUNCTION CALLS
     // =========================================================
 
-    private void generateCall(
-            CallExpression call
-    ) {
-
-        // -----------------------------------------------------
-        // input()
-        // -----------------------------------------------------
-
-    if (call.getName().equals("input")) {
-        assembly.append("    leaq -120(%rbp), %rdx\n");
-        assembly.append("    leaq input_format(%rip), %rcx\n");
-        assembly.append("    call scanf\n");
-        assembly.append("    movq -120(%rbp), %rax\n");
-        return;
-    }
-
-        // -----------------------------------------------------
-        // output()
-        // -----------------------------------------------------
-
-        if (call.getName().equals("output")) {
-
-            if (!call.getArguments().isEmpty()) {
-
-                /*
-                 * Generate the expression.
-                 *
-                 * Result:
-                 *     RAX = value to print
-                 */
-
-                generateExpression(
-                        call.getArguments().get(0)
-                );
-
-                /*
-                 * Windows x64 calling convention:
-                 *
-                 * RCX = first argument
-                 * RDX = second argument
-                 *
-                 * printf(format, value)
-                 */
-
-                assembly.append(
-                        "    movq %rax, %rdx\n"
-                );
-
-                assembly.append(
-                        "    leaq format_int(%rip), %rcx\n"
-                );
-
-                /*
-                 * 32 bytes shadow space + 8 bytes
-                 * for stack alignment.
-                 */
-
-                
-
-                assembly.append(
-                        "    call printf\n"
-                );
-
-                
-            }
-
-            /*
-             * output() behaves as void.
-             */
-            assembly.append(
-                    "    movq $0, %rax\n"
-            );
-
+    private void generateCall(CallExpression call) {
+        if (call.getName().equals("input")) {
+            assembly.append("    leaq -120(%rbp), %rdx\n");
+            assembly.append("    leaq input_format(%rip), %rcx\n");
+            assembly.append("    call scanf\n");
+            assembly.append("    movq -120(%rbp), %rax\n");
             return;
         }
 
-        // -----------------------------------------------------
-        // User-defined function
-        // -----------------------------------------------------
+        if (call.getName().equals("output")) {
+            if (!call.getArguments().isEmpty()) {
+                Expression argument = call.getArguments().get(0);
+                generateExpression(argument);
 
-        assembly.append(
-                "    call "
-                        + call.getName()
-                        + "\n"
-        );
+                if (isDecimalExpression(argument)) {
+                    assembly.append("    movq %xmm0, %rdx\n");
+                    assembly.append("    movq %rdx, %xmm1\n");
+                    assembly.append("    leaq format_decimal(%rip), %rcx\n");
+                    assembly.append("    call printf\n");
+                } else {
+                    assembly.append("    movq %rax, %rdx\n");
+                    assembly.append("    leaq format_int(%rip), %rcx\n");
+                    assembly.append("    call printf\n");
+                }
+            }
+
+            assembly.append("    movq $0, %rax\n");
+            return;
+        }
+
+        String[] integerArgumentRegisters = {
+                "%rcx", "%rdx", "%r8", "%r9"
+        };
+        String[] decimalArgumentRegisters = {
+                "%xmm0", "%xmm1", "%xmm2", "%xmm3"
+        };
+
+        List<Expression> arguments = call.getArguments();
+
+        // Save evaluated arguments first so later argument expressions
+        // cannot overwrite earlier register values.
+        for (int i = 0; i < arguments.size() && i < 4; i++) {
+            Expression argument = arguments.get(i);
+            generateExpression(argument);
+
+            int scratchOffset = -480 - (i * 8);
+            if (isDecimalExpression(argument)) {
+                ensureDecimalResult(argument);
+                assembly.append(
+                        "    movsd %xmm0, "
+                                + scratchOffset + "(%rbp)\n"
+                );
+            } else {
+                assembly.append(
+                        "    movq %rax, "
+                                + scratchOffset + "(%rbp)\n"
+                );
+            }
+        }
+
+        for (int i = 0; i < arguments.size() && i < 4; i++) {
+            Expression argument = arguments.get(i);
+            int scratchOffset = -480 - (i * 8);
+
+            if (isDecimalExpression(argument)) {
+                assembly.append(
+                        "    movsd " + scratchOffset + "(%rbp), "
+                                + decimalArgumentRegisters[i] + "\n"
+                );
+            } else {
+                assembly.append(
+                        "    movq " + scratchOffset + "(%rbp), "
+                                + integerArgumentRegisters[i] + "\n"
+                );
+            }
+        }
+
+        assembly.append("    call " + call.getName() + "\n");
     }
 
     // =========================================================
-    // MEMORY LOCATION
+    // MEMORY / LABELS
     // =========================================================
 
-    private String memoryLocation(
-            int offset
-    ) {
-
-        return offset
-                + "(%rbp)";
+    private String memoryLocation(int offset) {
+        return offset + "(%rbp)";
     }
 
-    // =========================================================
-    // LABEL GENERATOR
-    // =========================================================
-
-    private String newLabel(
-            String prefix
-    ) {
-
-        return prefix
-                + "_"
-                + labelCounter++;
+    private String newLabel(String prefix) {
+        return prefix + "_" + labelCounter++;
     }
 }

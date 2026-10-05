@@ -22,18 +22,27 @@ public class Lexer {
     private static final Map<String, TokenType> keywords = new HashMap<>();
 
     static {
+        // Functions and control flow
         keywords.put("func", TokenType.FUNC);
         keywords.put("send", TokenType.SEND);
+
         keywords.put("if", TokenType.IF);
         keywords.put("else", TokenType.ELSE);
+
+        // Arc supports "while" and "loop" as loop keywords
+        keywords.put("while", TokenType.LOOP);
         keywords.put("loop", TokenType.LOOP);
+
         keywords.put("each", TokenType.EACH);
+
         keywords.put("break", TokenType.BREAK);
         keywords.put("skip", TokenType.SKIP);
 
+        // Built-in functions
         keywords.put("output", TokenType.OUTPUT);
         keywords.put("input", TokenType.INPUT);
 
+        // Data types
         keywords.put("int", TokenType.INT);
         keywords.put("decimal", TokenType.DECIMAL);
         keywords.put("truth", TokenType.TRUTH);
@@ -41,6 +50,7 @@ public class Lexer {
         keywords.put("string", TokenType.STRING);
         keywords.put("void", TokenType.VOID);
 
+        // Boolean literals
         keywords.put("yes", TokenType.YES);
         keywords.put("no", TokenType.NO);
     }
@@ -54,10 +64,17 @@ public class Lexer {
             start = current;
             startLine = line;
             startColumn = column;
+
             scanToken();
         }
 
-        tokens.add(new Token(TokenType.EOF, "", line, column));
+        tokens.add(new Token(
+                TokenType.EOF,
+                "",
+                line,
+                column
+        ));
+
         return tokens;
     }
 
@@ -65,59 +82,97 @@ public class Lexer {
         char c = advance();
 
         switch (c) {
+
+            // Parentheses
             case '(':
                 addToken(TokenType.LEFT_PAREN);
                 break;
+
             case ')':
                 addToken(TokenType.RIGHT_PAREN);
                 break;
+
+            // Braces
             case '{':
                 addToken(TokenType.LEFT_BRACE);
                 break;
+
             case '}':
                 addToken(TokenType.RIGHT_BRACE);
                 break;
+
+            // Brackets
             case '[':
                 addToken(TokenType.LEFT_BRACKET);
                 break;
+
             case ']':
                 addToken(TokenType.RIGHT_BRACKET);
                 break;
+
+            // Separators
             case ',':
                 addToken(TokenType.COMMA);
                 break;
+
             case ';':
                 addToken(TokenType.SEMICOLON);
                 break;
+
+            // Arithmetic
             case '+':
                 addToken(TokenType.PLUS);
                 break;
+
             case '-':
                 addToken(TokenType.MINUS);
                 break;
+
             case '*':
                 addToken(TokenType.STAR);
                 break;
+
             case '%':
                 addToken(TokenType.PERCENT);
                 break;
 
+            // Assignment / equality
             case '=':
-                addToken(match('=') ? TokenType.EQUAL_EQUAL : TokenType.ASSIGN);
+                if (match('=')) {
+                    addToken(TokenType.EQUAL_EQUAL);
+                } else {
+                    addToken(TokenType.ASSIGN);
+                }
                 break;
 
+            // Not / not equal
             case '!':
-                addToken(match('=') ? TokenType.NOT_EQUAL : TokenType.NOT);
+                if (match('=')) {
+                    addToken(TokenType.NOT_EQUAL);
+                } else {
+                    addToken(TokenType.NOT);
+                }
                 break;
 
+            // Less than / less than or equal
             case '<':
-                addToken(match('=') ? TokenType.LESS_EQUAL : TokenType.LESS);
+                if (match('=')) {
+                    addToken(TokenType.LESS_EQUAL);
+                } else {
+                    addToken(TokenType.LESS);
+                }
                 break;
 
+            // Greater than / greater than or equal
             case '>':
-                addToken(match('=') ? TokenType.GREATER_EQUAL : TokenType.GREATER);
+                if (match('=')) {
+                    addToken(TokenType.GREATER_EQUAL);
+                } else {
+                    addToken(TokenType.GREATER);
+                }
                 break;
 
+            // Logical AND
             case '&':
                 if (match('&')) {
                     addToken(TokenType.AND_AND);
@@ -126,6 +181,7 @@ public class Lexer {
                 }
                 break;
 
+            // Logical OR
             case '|':
                 if (match('|')) {
                     addToken(TokenType.OR_OR);
@@ -134,6 +190,7 @@ public class Lexer {
                 }
                 break;
 
+            // Division / comments
             case '/':
                 if (match('/')) {
                     skipLineComment();
@@ -144,24 +201,29 @@ public class Lexer {
                 }
                 break;
 
+            // Whitespace
             case ' ':
             case '\r':
             case '\t':
                 break;
 
+            // New line
             case '\n':
                 line++;
                 column = 1;
                 break;
 
+            // Character literal
             case '\'':
                 charLiteral();
                 break;
 
+            // String literal
             case '"':
                 stringLiteral();
                 break;
 
+            // Identifiers and numbers
             default:
                 if (isDigit(c)) {
                     number();
@@ -170,6 +232,7 @@ public class Lexer {
                 } else {
                     error("Unexpected character: '" + c + "'");
                 }
+                break;
         }
     }
 
@@ -179,6 +242,7 @@ public class Lexer {
         }
 
         String text = source.substring(start, current);
+
         TokenType type = keywords.get(text);
 
         if (type == null) {
@@ -193,6 +257,7 @@ public class Lexer {
             advance();
         }
 
+        // Decimal number
         if (peek() == '.' && isDigit(peekNext())) {
             advance();
 
@@ -229,12 +294,14 @@ public class Lexer {
 
     private void stringLiteral() {
         while (peek() != '"' && !isAtEnd()) {
+
             if (peek() == '\n') {
                 line++;
                 column = 1;
+                advance();
+            } else {
+                advance();
             }
-
-            advance();
         }
 
         if (isAtEnd()) {
@@ -242,7 +309,9 @@ public class Lexer {
             return;
         }
 
+        // Closing "
         advance();
+
         addToken(TokenType.STRING_LITERAL);
     }
 
@@ -254,6 +323,7 @@ public class Lexer {
 
     private void skipBlockComment() {
         while (!isAtEnd()) {
+
             if (peek() == '*' && peekNext() == '/') {
                 advance();
                 advance();
@@ -263,9 +333,10 @@ public class Lexer {
             if (peek() == '\n') {
                 line++;
                 column = 1;
+                advance();
+            } else {
+                advance();
             }
-
-            advance();
         }
 
         error("Unterminated block comment.");
@@ -273,8 +344,10 @@ public class Lexer {
 
     private char advance() {
         char c = source.charAt(current);
+
         current++;
         column++;
+
         return c;
     }
 
@@ -289,6 +362,7 @@ public class Lexer {
 
         current++;
         column++;
+
         return true;
     }
 

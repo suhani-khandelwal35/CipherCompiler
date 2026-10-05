@@ -9,14 +9,29 @@ import java.nio.file.Path;
 import java.util.List;
 
 public class Main {
-
     public static void main(String[] args) throws Exception {
-
         String source = """
+                func decimal add(decimal a, decimal b) {
+                    send a + b;
+                }
+
                 func int main() {
-                    int x = input();
+                    decimal x = 12.5;
+                    decimal y = 2.5;
+                    decimal z = x * y + 1.0;
+
                     output(x);
-                    send x;
+                    output(y);
+                    output(z);
+                    output(add(x, y));
+
+                    if (z > 30.0) {
+                        output(1);
+                    } else {
+                        output(0);
+                    }
+
+                    send 0;
                 }
                 """;
 
@@ -29,11 +44,7 @@ public class Main {
         CodeGenerator codeGenerator = new CodeGenerator();
         String assembly = codeGenerator.generate(program);
 
-        Files.writeString(
-                Path.of("out/program.s"),
-                assembly
-        );
-
+        Files.writeString(Path.of("out/program.s"), assembly);
         System.out.println("Assembly generated: out/program.s");
     }
 }
